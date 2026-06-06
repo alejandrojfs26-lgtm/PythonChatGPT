@@ -25,39 +25,65 @@ Es un **chatbot de terminal** (CLI) que se conecta a un modelo de lenguaje ejecu
 ## 2. Arquitectura general
 
 ```
-main.py  ← único punto de entrada
-  │
-  ├── Lee variables de entorno (OLLAMA_URL, OLLAMA_API_KEY, OLLAMA_MODEL)
-  │
-  ├── Crea cliente OpenAI apuntando a Ollama
-  │
-  └── Bucle principal:
-       ├── Muestra menú (Rich Table)
-       ├── Lee input del usuario
-       ├── Envía mensajes a Ollama con streaming
-       ├── Muestra respuesta token por token
-       └── Acumula historial de la conversación
+config.py  ← configuración centralizada (dataclass + variables de entorno)
+    │
+    ▼
+main.py   ← punto de entrada
+    │
+    ├── Importa config (OLLAMA_URL, OLLAMA_MODEL, etc.)
+    ├── Acepta flags CLI: --model, --resume
+    ├── Crea cliente OpenAI apuntando a Ollama
+    │
+    ├── Bucle principal:
+    │    ├── Muestra menú (Rich Table)
+    │    ├── Lee input del usuario (con comandos: salir, exportar)
+    │    ├── Envía mensajes a Ollama con streaming
+    │    ├── Muestra respuesta token por token
+    │    └── Acumula historial de la conversación
+    │
+    └── Al salir:
+         ├── Guarda conversación en conversations/*.json
+         └── Exporta a Markdown en conversations/export_*.md
+
+conversations/  ← archivos JSON y MD de conversaciones guardadas
+tests/          ← tests con pytest
 ```
 
-**No hay separación en capas** — todo el código vive en un solo archivo (`main.py`). Esto es típico de prototipos y proyectos pequeños, pero para crecimiento conviene dividir en:
-- `config.py` — configuración
-- `client.py` — comunicación con la API
-- `chat.py` — lógica de conversación
-- `cli.py` — interfaz de terminal
+**Estructura actual del proyecto:**
+
+```
+PythonChatGPT/
+├── main.py              ← Lógica principal
+├── config.py            ← Configuración (dataclass)
+├── config.example.py    ← Documentación de variables
+├── requirements.txt     ← Dependencias
+├── README.md            ← Documentación
+├── ESTUDIO.md           ← Este documento
+├── ESTUDIO.pdf          ← Versión PDF
+├── .gitignore           ← Archivos ignorados
+├── conversations/       ← Conversaciones guardadas aquí
+└── tests/
+    ├── __init__.py
+    └── test_main.py     ← 4 tests unitarios
+```
 
 ---
 
 ## 3. Flujo de ejecución
 
-### 3.1 Importaciones (líneas 1-6)
+### 3.1 Importaciones (líneas 1-9)
 
 ```python
-from openai import OpenAI        # SDK oficial de OpenAI
+from openai import OpenAI            # SDK oficial de OpenAI
 from openai import APIConnectionError  # Excepción específica
-import typer                     # Framework para crear CLIs
-from rich import print           # print con colores y formato
-from rich.table import Table     # Tablas formateadas en terminal
-import os                        # Leer variables de entorno
+import typer                         # Framework para crear CLIs
+from rich import print               # print con colores y formato
+from rich.table import Table         # Tablas formateadas en terminal
+from datetime import datetime        # Timestamps para archivos
+import json                          # Serializar conversaciones
+from pathlib import Path             # Manejo de rutas
+
+from config import config            # Configuración centralizada
 ```
 
 **openai**: SDK oficial. Aunque está diseñado para la API de OpenAI, también funciona con servidores compatibles como Ollama (que expone una API idéntica). Esto permite cambiar entre Ollama local y OpenAI en la nube sin tocar el código.
@@ -66,120 +92,186 @@ import os                        # Leer variables de entorno
 
 **rich**: Biblioteca para terminales bonitas. Permite colores, tablas, markdown, barras de progreso, etc.
 
-### 3.2 Configuración desde entorno (líneas 8-12)
+### 3.2 Configuración desde `config.py`
 
 ```python
-BASE_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/v1")
-API_KEY = os.getenv("OLLAMA_API_KEY", "ollama")
-MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+# config.py
+import os
+from dataclasses import dataclass, field
 
-client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+@dataclass
+class Config:
+    base_url: str = field(default_factory=lambda: os.getenv("OLLAMA_URL", "http://localhost:11434/v1"))
+    api_key: str = field(default_factory=lambda: os.getenv("OLLAMA_API_KEY", "ollama"))
+    model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "llama3.2:1b"))
+
+config = Config()
 ```
 
-`os.getenv(var, default)` busca la variable de entorno `var`. Si no existe, usa `default`.
+```python
+# main.py
+from config import config
+client = OpenAI(base_url=config.base_url, api_key=config.api_key)
+```
+
+**`@dataclass`**: Decorador que genera automáticamente `__init__`, `__repr__`, etc. Los campos se definen con anotaciones de tipo.
+
+**`field(default_factory=...)`**: Permite que el valor por defecto se calcule en tiempo de ejecución (necesario porque `os.getenv` debe ejecutarse cuando se crea la instancia, no cuando se define la clase).
 
 **Por qué `api_key="ollama"`**: Ollama no requiere autenticación real, pero el SDK de OpenAI exige una API Key. Se pasa cualquier valor.
 
-**`base_url`**: La URL de la API. Ollama por defecto expone su API en `http://localhost:11434/v1`, que es compatible con el formato de OpenAI.
+**Ventaja**: La configuración está en un solo archivo. Si en el futuro se necesitan más variables (ej: `OLLAMA_TIMEOUT`), se agregan en `config.py` sin tocar `main.py`.
 
-### 3.3 La función main() (líneas 15-52)
+### 3.3 Funciones auxiliares (líneas 14-48)
 
-#### 3.3.1 Cabecera (líneas 16-20)
-
-```python
-def main() -> None:
-    print("[bold yellow]Chat-bot con IA (Ollama)[/bold yellow]")
-
-    table = Table("Opciones", "Descripción")
-    table.add_row("Salir", "Escribir 'salir' para salir del programa")
-    print(table)
-```
-
-`[bold yellow]...[/bold yellow]` es sintaxis de Rich para aplicar formato.
-
-`Table("Opciones", "Descripción")` crea una tabla de 2 columnas. `add_row()` agrega una fila.
-
-#### 3.3.2 Mensaje de sistema (líneas 22-24)
+#### 3.3.1 `_load_last_conversation()` — Cargar conversación previa
 
 ```python
-messages = [
-    {"role": "system", "content": "Eres un asistente muy util."}
-]
+def _load_last_conversation() -> list[dict]:
+    if not CONVERSATIONS_DIR.exists():
+        return []
+    files = sorted(CONVERSATIONS_DIR.glob("*.json"), reverse=True)
+    if not files:
+        return []
+    return json.loads(files[0].read_text())
 ```
 
-Esta es la **base del protocolo de chat de OpenAI** (y Ollama). Cada mensaje tiene:
-- `role`: puede ser `"system"`, `"user"`, o `"assistant"`
-- `content`: el texto del mensaje
+**`Path.glob("*.json")`**: Busca todos los archivos `.json` en el directorio.
 
-El mensaje de sistema define la **personalidad y comportamiento del asistente**. Se envía al inicio y el modelo lo usa como instrucción general.
+**`sorted(..., reverse=True)`**: Ordena por nombre (que incluye timestamp) y toma el más reciente.
 
-#### 3.3.3 Bucle principal (líneas 26-52)
+**`json.loads(files[0].read_text())`**: Lee el archivo JSON y lo convierte a lista de diccionarios.
+
+**Propósito**: Permitir `--resume` para retomar la última conversación.
+
+#### 3.3.2 `_save_conversation()` — Guardar conversación
+
+```python
+def _save_conversation(messages: list[dict]) -> Path:
+    CONVERSATIONS_DIR.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = CONVERSATIONS_DIR / f"chat_{timestamp}.json"
+    path.write_text(json.dumps(messages, indent=2, ensure_ascii=False))
+    return path
+```
+
+**`strftime("%Y%m%d_%H%M%S")`**: Genera un timestamp como `20260606_221530`.
+
+**`json.dumps(..., indent=2, ensure_ascii=False)`**: Serializa a JSON con formato legible y soporte para caracteres UTF-8 (acentos, ñ, etc.).
+
+#### 3.3.3 `_export_markdown()` — Exportar a Markdown
+
+```python
+def _export_markdown(messages: list[dict]) -> Path:
+    lines = ["# Conversación - PythonChatGPT\n"]
+    for msg in messages:
+        role = {"system": "🔧 Sistema", "user": "👤 Tú", "assistant": "🤖 Asistente"}.get(msg["role"], msg["role"])
+        lines.append(f"## {role}\n")
+        lines.append(f"{msg['content']}\n")
+    path = CONVERSATIONS_DIR / f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    path.write_text("\n".join(lines))
+    return path
+```
+
+**`.get(msg["role"], msg["role"])`**: Usa el emoji correspondiente según el rol. Si el rol no está en el diccionario, usa el valor original.
+
+**Propósito**: Generar un archivo Markdown legible para compartir o guardar respuestas importantes.
+
+### 3.4 La función main() (líneas 50-102)
+
+#### 3.4.1 Firma con Typer (líneas 50-53)
+
+```python
+def main(
+    model: str = typer.Option(config.model, "--model", "-m", help="Modelo de Ollama a usar"),
+    resume: bool = typer.Option(False, "--resume", "-r", help="Retomar la última conversación"),
+) -> None:
+```
+
+**`typer.Option()`**: Convierte el parámetro en una opción de línea de comandos:
+- `"--model"` / `"-m"` — ambas flags funcionan
+- `config.model` — valor por defecto (viene de variable de entorno o default)
+
+**Prioridad**: Flag CLI → variable de entorno → default en Config.
+
+#### 3.4.2 Cabecera (líneas 55-62)
+
+```python
+client = OpenAI(base_url=config.base_url, api_key=config.api_key)
+
+print("[bold yellow]Chat-bot con IA (Ollama)[/bold yellow]")
+print(f"  Modelo: [cyan]{model}[/cyan]")
+print(f"  Servidor: [cyan]{config.base_url}[/cyan]")
+
+table = Table("Opciones", "Descripción")
+table.add_row("salir", "Terminar la conversación")
+table.add_row("exportar", "Exportar la conversación a Markdown")
+print(table)
+```
+
+Ahora el cliente se crea DENTRO de `main()` para poder usar el modelo del flag.
+
+Se agregó el comando `exportar` a la tabla de opciones.
+
+#### 3.4.3 Inicializar mensajes (líneas 64-72)
+
+```python
+if resume:
+    messages = _load_last_conversation()
+    if messages:
+        print("[green]Conversación retomada.[/green]")
+    else:
+        print("[yellow]No hay conversaciones previas. Empezando nueva.[/yellow]")
+        messages = [{"role": "system", "content": "Eres un asistente muy util."}]
+else:
+    messages = [{"role": "system", "content": "Eres un asistente muy util."}]
+```
+
+Si `--resume` está activo, carga la última conversación guardada. Si no hay, empieza una nueva.
+
+#### 3.4.4 Bucle principal (líneas 74-101)
 
 ```python
 while True:
-    content = input("Escribe tu pregunta: ")
+    content = input("\n[bold cyan]Escribe tu pregunta: [/bold cyan]")
     if content == "salir":
         break
+    if content == "exportar":
+        md_path = _export_markdown(messages)
+        print(f"[green]Conversación exportada a: {md_path}[/green]")
+        continue
+
     messages.append({"role": "user", "content": content})
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            stream=True,
+        )
+        ...
+    except APIConnectionError:
+        print("\n[red]Error: No se pudo conectar a Ollama.[/red]")
+        print("[yellow]Asegúrate de que Ollama esté corriendo:[/yellow]")
+        print("  ollama serve")
+        break
 ```
 
-**`input()`**: Función nativa de Python que muestra un prompt y espera texto del usuario.
+**Comando `exportar`**: Exporta la conversación actual sin salir del programa.
 
-Se agrega el mensaje del usuario al historial (`messages`).
+**`model=model`** (antes `MODEL`): Usa el parámetro de la función, que puede venir del flag CLI.
 
-#### 3.3.4 Llamada a la API con streaming (líneas 32-45)
+#### 3.4.5 Al salir (líneas 103-105)
 
 ```python
-try:
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        stream=True,
-    )
-
-    assistant_reply = ""
-    for chunk in response:
-        if chunk.choices[0].delta.content:
-            content_chunk = chunk.choices[0].delta.content
-            print(content_chunk, end="")
-            assistant_reply += content_chunk
-    print()
+_save_conversation(messages)
+md_path = _export_markdown(messages)
+print(f"\n[green]Conversación guardada. Exportada a: {md_path}[/green]")
 ```
 
-**`stream=True`**: Activa el streaming. En lugar de esperar a que el modelo termine de generar toda la respuesta, la API devuelve **tokens individuales** (o fragmentos) a medida que se generan.
+**Siempre se guarda y exporta al salir**, incluso si no se usó `--resume`.
 
-**`client.chat.completions.create()`**: El método principal del SDK de OpenAI. Parámetros:
-- `model`: nombre del modelo en Ollama (ej: `llama3.2:1b`)
-- `messages`: lista completa de mensajes (contexto de la conversación)
-- `stream=True`: activa respuesta en streaming
-
-**`for chunk in response`**: Itera sobre los fragmentos que llegan. Cada `chunk` contiene:
-- `choices[0].delta.content`: el texto del token actual (puede ser `None`)
-- `choices[0].finish_reason`: `"stop"` cuando termina
-
-**`print(content_chunk, end="")`**: Imprime sin salto de línea, para que los tokens aparezcan uno tras otro en la misma línea.
-
-#### 3.3.5 Guardar respuesta (línea 47)
-
-```python
-messages.append({"role": "assistant", "content": assistant_reply})
-```
-
-Se agrega la respuesta completa al historial, para que el modelo tenga contexto en la siguiente pregunta.
-
-#### 3.3.6 Manejo de errores (líneas 48-52)
-
-```python
-except APIConnectionError:
-    print("\n[red]Error: No se pudo conectar a Ollama.[/red]")
-    print("[yellow]Asegúrate de que Ollama esté corriendo:[/yellow]")
-    print("  ollama serve")
-    break
-```
-
-`APIConnectionError` se lanza cuando el SDK no puede conectar con el servidor. En lugar de un crash con traceback feo, se muestra un mensaje amigable.
-
-### 3.4 Punto de entrada (líneas 55-56)
+### 3.5 Punto de entrada (línea 108)
 
 ```python
 if __name__ == "__main__":
@@ -190,43 +282,66 @@ if __name__ == "__main__":
 
 **`typer.run(main)`**: Toma la función `main()` y la convierte en un comando CLI. Typer automáticamente:
 - Genera ayuda con `--help`
-- Maneja argumentos de línea de comandos (si los hubiera)
-- Ejecuta la función
+- Maneja argumentos de línea de comandos (`--model`, `--resume`)
+- Convierte el `bool` de `resume` en flag (`--resume` presente = `True`, ausente = `False`)
 
 ---
 
 ## 4. Desglose de cada archivo
 
 ### 4.1 `main.py`
-**Propósito**: Único archivo ejecutable. Contiene toda la lógica.
-**Líneas**: 56
+**Propósito**: Archivo ejecutable principal. Contiene la lógica de la CLI, el bucle de conversación y las funciones auxiliares.
+**Líneas**: 108
 **Responsabilidades**:
-- Configuración (líneas 8-12)
-- Interfaz de usuario (líneas 16-20)
-- Bucle de conversación (líneas 26-52)
-- Manejo de errores (líneas 48-52)
+- Importar configuración desde `config.py` (línea 10)
+- Crear cliente OpenAI (línea 55)
+- Funciones auxiliares: `_load_last_conversation`, `_save_conversation`, `_export_markdown` (líneas 14-48)
+- Interfaz de usuario con Rich y Typer (líneas 57-62)
+- Bucle de conversación con streaming (líneas 74-101)
+- Manejo de errores `APIConnectionError` (líneas 96-100)
+- Guardado y exportación al salir (líneas 103-105)
 
-### 4.2 `requirements.txt`
+### 4.2 `config.py`
+**Propósito**: Centralizar toda la configuración del proyecto en un dataclass.
+**Líneas**: 12
+**Responsabilidades**:
+- Leer variables de entorno con valores por defecto
+- Proveer un objeto `Config` con `base_url`, `api_key`, `model`
+- Ser importable desde `main.py` y desde `tests/`
+
+**Ventaja sobre tener la config en main.py**: Si se agregan más variables (timeout, temperatura del modelo, etc.), solo se modifica `config.py`.
+
+### 4.3 `requirements.txt`
 **Propósito**: Lista de dependencias para `pip install`.
-**openai>=1.0.0**: SDK para comunicarse con la API.
-**typer>=0.9.0**: Framework CLI.
-**rich>=13.0.0**: Formato de terminal.
+- **openai>=1.0.0**: SDK para comunicarse con la API.
+- **typer>=0.9.0**: Framework CLI.
+- **rich>=13.0.0**: Formato de terminal.
 
-### 4.3 `config.example.py`
+### 4.4 `config.example.py`
 **Propósito**: Documentar las variables de entorno disponibles.
 **Uso**: Copiar a `.env` o exportar las variables manualmente.
-**Nota**: En la versión actual, el código usa `os.getenv()` directamente en `main.py` en lugar de leer este archivo.
 
-### 4.4 `.gitignore`
+### 4.5 `.gitignore`
 **Propósito**: Evitar que archivos locales se suban a Git.
 **Excluye**:
-- `.venv/` — entorno virtual (pesado y específico de cada máquina)
-- `config.py` — archivo con claves reales (evitar fugas de secrets)
-- `__pycache__/` y `*.pyc` — archivos compilados de Python
+- `.venv/` — entorno virtual
+- `config.py` — claves reales
+- `__pycache__/` y `*.pyc` — archivos compilados
+- `conversations/*.json` y `conversations/*.md` — datos de usuario
 - `.vscode/` y `.idea/` — configuraciones de IDE
 
-### 4.5 `README.md`
+### 4.6 `README.md`
 **Propósito**: Documentación del proyecto para quien visite el repositorio.
+
+### 4.7 `tests/test_main.py`
+**Propósito**: Tests unitarios con pytest (4 tests).
+**Funcionalidad probada**:
+- `test_config_defaults`: Verifica valores por defecto de Config
+- `test_config_from_env`: Verifica que las variables de entorno sobreescriban
+- `test_save_and_load_conversation`: Verifica guardado y carga JSON
+- `test_export_markdown`: Verifica que el Markdown incluya roles y contenido
+
+**Estructura de cada test**: Usa `monkeypatch` para simular variables de entorno y `TemporaryDirectory` para aislar archivos temporales.
 
 ---
 
@@ -300,22 +415,42 @@ Si se cambia a `https://api.openai.com/v1` y se pone una API key real, el mismo 
 
 ---
 
-## 7. Posibles mejoras
+## 7. Historial de mejoras implementadas
 
-### 7.1 Inmediatas (bajo esfuerzo, alto impacto)
-- Separar configuración en `config.py`
-- Agregar `--help` personalizado con Typer
-- Guardar conversaciones en JSON
+### ✅ Mejora 1 — Configuración separada en `config.py`
+**Archivos**: `config.py` (nuevo), `main.py` (modificado)
+**Qué cambió**: Se centralizaron `base_url`, `api_key`, `model` en un dataclass.
+**Por qué**: Antes la configuración estaba mezclada con la lógica. Ahora se puede cambiar desde un solo lugar y es fácil de testear.
 
-### 7.2 Mediano plazo
-- Selector de modelos (flag `--model`)
-- Múltiples conversaciones con nombres
-- Exportar a Markdown
+### ✅ Mejora 2 — Persistencia de conversaciones en JSON
+**Archivos**: `main.py` (funciones `_save_conversation`, `_load_last_conversation`)
+**Qué cambió**: Cada conversación se guarda en `conversations/chat_YYYYMMDD_HHMMSS.json`.
+**Por qué**: Permite retomar conversaciones con `--resume` y no perder el historial.
 
-### 7.3 Avanzado
-- Interfaz web con Gradio
-- Plugins (ej: ejecutar código, buscar web)
-- RAG (búsqueda en documentos propios)
+### ✅ Mejora 3 — Selector de modelos por flag CLI
+**Archivos**: `main.py` (parámetro `model` en `main()`)
+**Qué cambió**: `python main.py --model llama3.1:8b` sobreescribe el modelo.
+**Por qué**: Antes solo se podía cambiar via variable de entorno. Ahora es más rápido y no requiere reiniciar la terminal.
+
+### ✅ Mejora 4 — Exportación a Markdown
+**Archivos**: `main.py` (función `_export_markdown`)
+**Qué cambió**: Comando `exportar` durante la conversación, y export automático al salir.
+**Por qué**: Permite guardar respuestas importantes en un formato legible y compartible.
+
+### ✅ Mejora 5 — Tests con pytest
+**Archivos**: `tests/test_main.py` (4 tests)
+**Qué cambió**: Se agregaron tests unitarios para config, persistencia y exportación.
+**Por qué**: Los tests son señal de profesionalismo. Verifican que el código funciona y previenen regresiones.
+
+### ▶️ Próximas mejoras posibles
+
+| Prioridad | Mejora | Esfuerzo |
+|---|---|---|
+| Alta | Múltiples conversaciones con nombres | Medio |
+| Alta | Soporte para OpenAI además de Ollama (flag `--provider`) | Medio |
+| Media | Interfaz web con Gradio | Alto |
+| Media | Plugins (ej: ejecutar código, buscar web) | Alto |
+| Baja | RAG (búsqueda en documentos propios) | Muy alto |
 
 ---
 
