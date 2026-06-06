@@ -9,6 +9,10 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Conversaciones guardadas
+conversations/*.json
+conversations/*.md
+
 # IDE
 .vscode/
 .idea/

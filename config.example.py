@@ -1,5 +1,5 @@
 # Configuración para PythonChatGPT
-# Copia este archivo como .env o exporta las variables
+# Exporta estas variables o copia este archivo como config.py
 
 OLLAMA_URL=http://localhost:11434/v1
 OLLAMA_API_KEY=ollama

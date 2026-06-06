@@ -2,19 +2,23 @@
 
 Chatbot de terminal que se conecta a modelos locales vía [Ollama](https://ollama.ai/) usando la API compatible con OpenAI.
 
+## Características
+
+- Streaming de respuestas en tiempo real
+- Persistencia de conversaciones (se guardan automáticamente)
+- Exportación a Markdown
+- Selector de modelos por flag CLI
+- Retomar conversaciones anteriores
+- Manejo de errores amigable
+
 ## Requisitos
 
 - Python 3.10+
-- [Ollama](https://ollama.ai/) instalado y corriendo con al menos un modelo descargado
+- [Ollama](https://ollama.ai/) instalado y corriendo
 
 ```bash
-# Instalar Ollama
 curl -fsSL https://ollama.ai/install.sh | sh
-
-# Descargar un modelo
 ollama pull llama3.2:1b
-
-# Iniciar Ollama
 ollama serve
 ```
 
@@ -23,10 +27,8 @@ ollama serve
 ```bash
 git clone https://github.com/alejandrojfs26-lgtm/PythonChatGPT.git
 cd PythonChatGPT
-
 python -m venv .venv
 source .venv/bin/activate
-
 pip install -r requirements.txt
 ```
 
@@ -34,13 +36,32 @@ pip install -r requirements.txt
 
 ```bash
 python main.py
+python main.py --model llama3.1:8b
+python main.py --resume
 ```
 
-Escribe tu pregunta y presiona Enter. Escribe `salir` para terminar.
+| Opción | Descripción |
+|---|---|
+| `--model, -m` | Modelo de Ollama a usar (default: `llama3.2:1b`) |
+| `--resume, -r` | Retomar la última conversación guardada |
+
+Comandos durante la conversación:
+
+| Comando | Acción |
+|---|---|
+| `salir` | Termina y guarda la conversación |
+| `exportar` | Exporta a Markdown sin salir |
+
+## Tests
+
+```bash
+pip install pytest
+pytest tests/
+```
 
 ## Configuración
 
-Variables de entorno (opcionales):
+Variables de entorno (opcionales, se pueden sobreescribir con `--model`):
 
 | Variable | Default | Descripción |
 |---|---|---|
